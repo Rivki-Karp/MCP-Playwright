@@ -1,70 +1,111 @@
-import mcp.server.fastmcp as fastmcp
+import asyncio
+import logging
+from mcp.server.fastmcp import FastMCP
 from playwright.async_api import async_playwright
 
-# Initialize FastMCP server for Israel weather
-mcp = fastmcp.FastMCP("WeatherIsrael")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("weather_israel_mcp")
 
-# Global dictionary to manage Playwright lifecycle
-_browser_state = {
+# Initialize FastMCP server
+mcp = FastMCP("WeatherIsrael")
+
+# Global browser state to maintain session
+state = {
     "playwright": None,
     "browser": None,
     "page": None
 }
 
-async def get_page():
-    """
-    Ensures a single browser instance is used across tool calls.
-    Launched in non-headless mode to allow visual tracking of the process.
-    """
-    if _browser_state["page"] is None:
-        _browser_state["playwright"] = await async_playwright().start()
-        _browser_state["browser"] = await _browser_state["playwright"].chromium.launch(headless=False)
-        _browser_state["page"] = await _browser_state["browser"].new_page()
-    return _browser_state["page"]
+async def ensure_browser():
+    """Ensures that a browser instance and page are available."""
+    if state["page"] is None:
+        state["playwright"] = await async_playwright().start()
+        state["browser"] = await state["playwright"].chromium.launch(headless=False)
+        state["page"] = await state["browser"].new_page()
+    return state["page"]
 
 @mcp.tool()
-async def open_weather_forecast_israel():
-    """
-    Step 1: Opens the browser and navigates to the Israeli weather website.
-    """
-    page = await get_page()
-    await page.goto("https://www.weather2day.co.il/forecast")
-    return "Weather website opened successfully."
+async def open_weather_forecast_israel() -> str:
+    """Step 1: Opens the Israeli weather forecast website."""
+    try:
+        page = await ensure_browser()
+        await page.goto("https://www.weather2day.co.il/forecast", wait_until="networkidle")
+        return "Weather website opened successfully."
+    except Exception as e:
+        return f"Error opening website: {str(e)}"
 
 @mcp.tool()
-async def enter_weather_forecast_city_israel(city_name: str):
-    """
-    Step 2: Enters the requested city name into the search input field.
-    """
-    page = await get_page()
-    # Selector for the search input field on weather2day
-    search_selector = "input#search-input" 
-    await page.wait_for_selector(search_selector)
-    await page.fill(search_selector, city_name)
-    return f"City '{city_name}' entered into search field."
+async def enter_weather_forecast_city_israel(city_name_hebrew: str) -> str:
+    """Step 2: Inputs the city name in Hebrew into the search field."""
+    try:
+        page = await ensure_browser()
+        search_selector = "input#city_search_forecast"
+        
+        await page.wait_for_selector(search_selector, state="visible")
+        await page.click(search_selector)
+        await page.fill(search_selector, "") 
+        
+        # Human-like typing to trigger the specific autocomplete list[cite: 1]
+        await page.type(search_selector, city_name_hebrew, delay=200)
+        
+        return f"City '{city_name_hebrew}' entered into the search field."
+    except Exception as e:
+        return f"Error entering city: {str(e)}"
 
 @mcp.tool()
-async def select_weather_forecast_city_israel():
-    """
-    Step 3: Selects the first result (typically by pressing Enter) and waits for navigation.
-    """
-    page = await get_page()
-    await page.keyboard.press("Enter")
-    # Wait for the page to load the specific city's forecast
-    await page.wait_for_load_state("networkidle")
-    return "City selected and forecast page loaded."
+async def select_weather_forecast_city_israel() -> str:
+    """Step 3: Selects the city from the specific autocomplete list identified in HTML[cite: 1]."""
+    try:
+        page = await ensure_browser()
+        
+        # Correct selectors based on the provided HTML[cite: 1]
+        list_selector = "#city_search_forecastautocomplete-list"
+        item_selector = f"{list_selector} div"
+        
+        # Wait for the suggestions to appear[cite: 1]
+        await page.wait_for_selector(item_selector, timeout=7000)
+        
+        # Click the first suggestion to trigger navigation[cite: 1]
+        await page.click(item_selector)
+        
+        # Safety Enter and wait for load[cite: 1]
+        await page.keyboard.press("Enter")
+        await page.wait_for_load_state("networkidle")
+        
+        return "City selected and weather page loaded."
+    except Exception as e:
+        return f"Error selecting city: {str(e)}"
 
 @mcp.tool()
-async def scrape_weather_data():
-    """
-    Step 4 (RAG): Extracts the text content from the forecast page for the LLM to process.
-    This provides the context needed for the LLM to answer the user directly.
-    """
-    page = await get_page()
-    # Extracting the main forecast container text to minimize token noise
-    # We focus on the body or a specific forecast container
-    content = await page.inner_text("body")
-    
-    # Basic cleaning and truncation to fit within model context limits
-    clean_content = " ".join(content.split())
-    return f"Extracted Forecast Data: {clean_content[:2000]}"
+async def extract_weather_data_israel() -> str:
+    """Step 4: Extracts data and then closes the browser[cite: 1]."""
+    try:
+        page = await ensure_browser()
+        await page.wait_for_selector(".current-weather", timeout=10000)
+        
+        temp = await page.inner_text(".temperature")
+        details = await page.inner_text(".weather-details")
+        
+        result = f"Weather Data:\nTemperature: {temp}\nDetails: {details}"
+        
+        # Closing the browser after the final action[cite: 1]
+        await close_israel_browser()
+        
+        return result
+    except Exception as e:
+        await close_israel_browser()
+        return f"Error extracting data or browser closed: {str(e)}"
+
+async def close_israel_browser():
+    """Helper function to clean up browser resources[cite: 1]."""
+    if state["browser"]:
+        await state["browser"].close()
+    if state["playwright"]:
+        await state["playwright"].stop()
+    state["page"] = None
+    state["browser"] = None
+    state["playwright"] = None
+
+if __name__ == "__main__":
+    mcp.run()
